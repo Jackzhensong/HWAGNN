@@ -10,10 +10,27 @@
 - torchaudio 0.12.0
 - scikit-learn 1.3.2
 - pywavelets==1.4.1
+- torch-geometric==2.1.0
 
 ## Easy Start
 
-1. `unzip data.zip -d data`
-2. `pip install -r requirement.yaml`
-2. `python main`
+- Unzip the datasets
+
+  ```
+  unzip data.zip -d data
+  ```
+
+- Install the dependences: 
+
+  ```
+  pip install -r requirement.yaml
+  ```
+
+- Executing the following command to run the code:
+
+  ```
+  bash run.sh
+  ```
+
+- To run the model on other settings, use `--dataset` to specify datasets, `--model` to indicate the running model, `--wave` to set the wavelet function for DWT, `--levels` to set the wavelet decomposition levels, and `--device` to set the device number.
 
