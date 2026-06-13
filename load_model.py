@@ -1,10 +1,11 @@
 from model import *
-from modelplus import *
+
 
 def parse_model(args, dataset, data):
-    if args.model == 'MWTGNN':
-        model = MWTGNN(dataset.num_features, args.hidden, dataset.num_classes, args.num_layers, args.dropout,
-                args.wave)
+    if args.model == 'HWAGNN':
+        model = HWAGNN(dataset.num_features, args.hidden, dataset.num_classes, args.num_layers, args.dropout,
+                      args.alpha, args.Init, args.wave, args.use_bn)
+        
     elif args.model == 'MLP':
         model = MLP(dataset.num_features, args.hidden, dataset.num_classes, args.num_layers, args.dropout)
     elif args.model == 'GCN':

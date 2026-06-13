@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, GATConv, JumpingKnowledge, APPNP, MessagePassing
 from utils import Dwt, Iwt
 from torch.nn import Parameter
-from torch_geometric.nn import Linear
+from torch.nn import Linear
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
 from torch_sparse import SparseTensor, matmul
 import scipy.sparse
@@ -538,7 +538,7 @@ class FAGCN(nn.Module):
 
 class Conv_Pro(MessagePassing):
     '''
-    propagation class for mwtgnn
+    propagation class for hwagnn
     '''
     def __init__(self, bias=True, **kwargs):
         super(Conv_Pro, self).__init__(aggr='add', **kwargs)
@@ -559,10 +559,10 @@ class Conv_Pro(MessagePassing):
     #     return '{}(K={}, temp={})'.format(self.__class__.__name__, self.K, self.temp)
 
 
-class MWTGNN(nn.Module):
+class HWAGNN(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers,
-                 dropout, wave='haar', mode='zero', save_mem=True, use_bn=True):
-        super(MWTGNN, self).__init__()
+                 dropout, alpha, Init='PPR', wave='haar', use_bn=True):
+        super(HWAGNN, self).__init__()
 
         self.fcs = nn.ModuleList()
         self.fcs.append(nn.Linear(in_channels, hidden_channels))
@@ -571,20 +571,52 @@ class MWTGNN(nn.Module):
         self.prop1 = Conv_Pro()
         self.bn = nn.BatchNorm1d(out_channels)
         self.dwt = DWT_1D(wavename=wave)
-        self.iwt = IDWT_1D(wavename=wave)
+        self.softmax = nn.Softmax(dim=-1)
+
+        self.lins = nn.ModuleList()
+        for i in range(1, num_layers+1):
+            self.lins.append(nn.Linear(hidden_channels // (2**i), hidden_channels))
+
+        self.K = num_layers
+        self.Init = Init
+        self.alpha = alpha
+
+        assert Init in ['PPR', 'Random']
+        if Init == 'PPR':
+            # PPR-like
+            TEMP = alpha*(1-alpha)**np.arange(self.K+1)
+            TEMP[-1] = (1-alpha)**self.K
+        elif Init == 'Random':
+            # Random
+            bound = np.sqrt(3/(self.K+1))
+            TEMP = np.random.uniform(-bound, bound, self.K+1)
+            TEMP = TEMP/np.sum(np.abs(TEMP))
+
+        self.temp = Parameter(torch.tensor(TEMP))
 
         self.dropout = dropout
         self.use_bn = use_bn
-        self.num_layers = num_layers
-        self.wave = wave
-        self.mode = mode
-        self.reset_parameters()
-
+        self.num_layers = num_layers   
+        # self.reset_parameters()
+    
     def reset_parameters(self):
         self.prop1.reset_parameters()
         self.bn.reset_parameters()
         for fc in self.fcs:
             fc.reset_parameters()
+        for lin in self.lins:
+            lin.reset_parameters()
+
+        torch.nn.init.zeros_(self.temp)
+        if self.Init == 'PPR':
+            for k in range(self.K+1):
+                self.temp.data[k] = self.alpha*(1-self.alpha)**k
+            self.temp.data[-1] = (1-self.alpha)**self.K
+        elif self.Init == 'Random':
+            bound = np.sqrt(3/(self.K+1))
+            torch.nn.init.uniform_(self.temp,-bound,bound)
+            self.temp.data = self.temp.data/torch.sum(torch.abs(self.temp.data))
+
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
@@ -592,31 +624,21 @@ class MWTGNN(nn.Module):
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = F.relu(self.fcs[0](x))
         x = F.dropout(x, p=self.dropout, training=self.training)
+        # x = self._apply_feature_order(x)
 
-        y = self.prop1(x, edge_index)
-        
-        x_l_in_levels = []
-        x_h_in_levels = []
-
+        hidden = x*(self.temp[0])
         curr_x_l = x.unsqueeze(1)
+
         for i in range(1, self.num_layers+1):
             curr_x_l, x_h = self.dwt(curr_x_l)
 
-            x_l_in_levels.append(self.prop1(curr_x_l.squeeze(1), edge_index))
-            x_h_in_levels.append(self.prop1(x_h.squeeze(1), edge_index))
+            output = curr_x_l.squeeze(1)
+            x_high = self.softmax(x_h.squeeze(1))
+            AttMap = torch.mul(output, x_high)
+            output = torch.add(output, AttMap)
+            
+            gamma = self.temp[i]
+            hidden = hidden + gamma*self.lins[i-1](self.prop1(output, edge_index))
 
-        next_x_l = 0
-        for i in range(self.num_layers-1, -1, -1):
-            curr_x_l = x_l_in_levels.pop()
-            curr_x_h = x_h_in_levels.pop()
-
-            curr_x_l = curr_x_l + next_x_l
-            next_x_l = self.iwt(curr_x_l.unsqueeze(1), curr_x_h.unsqueeze(1)).squeeze(1)
-
-        x_tag = next_x_l
-        assert len(x_l_in_levels) == 0
-        
-        z0 = y + x_tag
-        z = self.bn(self.fcs[-1](z0))
-
+        z = self.bn(self.fcs[-1](hidden))
         return z

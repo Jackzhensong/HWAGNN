@@ -11,10 +11,10 @@ import time
 from utils_wavelet import *
 
 from config import seed_everything
-import subprocess
+from copy import deepcopy
 
 
-def train(data):
+def train(data, model, optimizer, criterion):
     model.train()
     optimizer.zero_grad()
     out = model(data)
@@ -25,7 +25,7 @@ def train(data):
 
 
 @torch.no_grad()
-def test(data):
+def test(data, model):
     model.eval()
     out = model(data)
     pred = out.argmax(dim=1)  # Use the class with highest probability.
@@ -36,7 +36,7 @@ def test(data):
 
 
 @torch.no_grad()
-def valid(data):
+def valid(data, model):
     model.eval()
     out = model(data)
     pred = out.argmax(dim=1)  # Use the class with highest probability.
@@ -44,6 +44,58 @@ def valid(data):
     val_acc = int(val_correct.sum()) / int(data.val_mask.sum())  # Derive ratio of correct predictions.
     return val_acc
 
+
+def run_training(args, dataset, base_data, device):
+    train_rate = 0.6
+    val_rate = 0.2
+    if args.dataset == 'deezer':
+        train_rate = 0.5
+        val_rate = 0.25
+
+    num_nodes = dataset.num_nodes
+    percls_trn = int(round(train_rate * num_nodes / dataset.num_classes))
+    val_lb = int(round(val_rate * num_nodes))
+
+    accs, test_accs = [], []
+
+    for rand in trange(args.runs):
+        seed_everything(args.baseseed + rand)
+        data = deepcopy(base_data)
+        data = random_planetoid_splits(data, dataset.num_classes, percls_trn, val_lb).to(device)
+
+        model = parse_model(args, dataset, data)
+        criterion = torch.nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+
+        data, model = data.to(device), model.to(device)
+        best_acc = -1.
+        final_test_acc = 0.
+        es_count = args.patience
+
+        for epoch in range(args.epochs):
+            loss, out = train(data, model, optimizer, criterion)
+
+            val_acc = valid(data, model)
+            test_acc = test(data, model)
+            if val_acc > best_acc:
+                es_count = args.patience
+                best_acc = val_acc
+                final_test_acc = test_acc
+
+            else:
+                es_count -= 1
+            if es_count <= 0:
+                break
+
+        accs.append(best_acc)
+        test_accs.append(final_test_acc)
+
+    accs = torch.tensor(accs)
+    test_accs = torch.tensor(test_accs)
+    print(f'{args.dataset} ({args.feature_order}) valid_acc: {100 * accs.mean().item():.2f} ± {100 * accs.std().item():.2f}')
+    print(f'{args.dataset} ({args.feature_order}) test_acc: {100 * test_accs.mean().item():.2f} ± {100 * test_accs.std().item():.2f}')
+
+    return accs, test_accs
 
 
 if __name__ == "__main__":
@@ -57,9 +109,12 @@ if __name__ == "__main__":
     parser.add_argument('--dropout', type=float, default=0.8)
     parser.add_argument('--num_layers', type=int, default=3)
     parser.add_argument('--act', type=str, default='relu', choices=['relu', 'tanh'])
-    parser.add_argument('--model', '-M', type=str, default='MLGCN')
+    parser.add_argument('--model', '-M', type=str, default='HWAGNN')
     parser.add_argument('--levels', type=int, default=2)
     parser.add_argument('--device', type=int, default=0, help='which gpu to use if any (default: 0)')
+    parser.add_argument('--epochs', type=int, default=500)
+    parser.add_argument('--patience', type=int, default=100)
+    parser.add_argument('--runs', type=int, default=10)
 
     parser.add_argument('--wave', type=str, default='haar')
     parser.add_argument('--mode', type=str, default='zero')
@@ -81,58 +136,7 @@ if __name__ == "__main__":
     dataset, data = DataLoader(args.dataset)
     print(f"load {args.dataset} successfully!")
     print('==============================================================')
-
     warnings.filterwarnings("ignore")
 
-
-    args_dict = vars(args)
-#     args_dict.update(optimized_params)
-    args = argparse.Namespace(**args_dict)
-
-    train_rate = 0.6
-    val_rate = 0.2
-    if args.dataset == 'deezer':
-        train_rate = 0.5
-        val_rate = 0.25
-    # class balance for training dataset
-    num_nodes = dataset.num_nodes
-    percls_trn = int(round(train_rate * num_nodes / dataset.num_classes))
-    val_lb = int(round(val_rate * num_nodes))
-    accs, test_accs = [], []
-
-    # 10 times rand part
-    for rand in trange(10):
-        # training settings
-        seed_everything(args.baseseed + rand)
-        data = random_planetoid_splits(data, dataset.num_classes, percls_trn, val_lb).to(device)
-
-        model = parse_model(args, dataset, data)
-        criterion = torch.nn.CrossEntropyLoss()
-
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
-
-        data, model = data.to(device), model.to(device)
-        # model.reset_parameters()
-        best_acc = 0.
-        final_test_acc = 0.
-        es_count = patience = 100
-        for epoch in range(500):
-            loss, out = train(data)            
-            val_acc = valid(data)
-            test_acc = test(data)
-            if val_acc > best_acc:
-                es_count = patience
-                best_acc = val_acc
-                final_test_acc = test_acc
-
-            else:
-                es_count -= 1
-            if es_count <= 0:
-                break
-        accs.append(best_acc)
-        test_accs.append(final_test_acc)
-    accs = torch.tensor(accs)
-    test_accs = torch.tensor(test_accs)
-
-    print(f'{args.dataset} valid_acc: {100 * accs.mean().item():.2f} ± {100 * accs.std().item():.2f}')
-    print(f'{args.dataset} test_acc: {100 * test_accs.mean().item():.2f} ± {100 * test_accs.std().item():.2f}')    
+    run_training(args, dataset, data, device)
+  

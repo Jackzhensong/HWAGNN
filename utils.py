@@ -4,7 +4,7 @@
 
 import torch
 import os
-from config import Config
+
 
 
 def Dwt(f, depth=None):

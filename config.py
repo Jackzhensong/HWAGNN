@@ -4,13 +4,6 @@ import numpy as np
 import random
 
 
-class Config:
-    # num_training = 1208
-    # num_testing = 1000
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    # device = 'cpu'
-
-
 def seed_everything(seed):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
